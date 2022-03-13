@@ -8,6 +8,7 @@ from rlberry.envs.classic_control import MountainCar
 from rlberry.envs.finite import Chain, GridWorld
 from gym.envs.classic_control import CartPoleEnv
 from rlberry.agents.agent import Agent
+from time import time
 
 ALL_ENVS = {
     'Acrobot': Acrobot,
@@ -36,6 +37,12 @@ def base_benchmarks(model):
         results = benchmark(bench, model)
 
 
-def benchmark(bench, model):
+def benchmark(bench, agent_class: Agent):
+    agent = agent_class(env=bench)
+    start = time()
+    agent.fit()
+    training_time = time()-start
+    performance = agent.eval()
+    return training_time, performance
 
     # %%
