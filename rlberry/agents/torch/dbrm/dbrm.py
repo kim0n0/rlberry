@@ -305,8 +305,11 @@ class DBRMAgent(AgentWithSimplePolicy):
         for _ in range(self.k_epochs):
 
             # shuffle samples
-            rd_indices = self.rng.choice(n_samples, size=n_samples, replace=False)
+            # cant pick last one (no next state)
+            # TODO: more efficient and clean way to not select the last ? 2047 is ugly
+            rd_indices = self.rng.choice(n_samples-1, size=n_samples-1, replace=False)
             shuffled_states = full_old_states[rd_indices]
+            shuffled_new_states = full_old_states[rd_indices+1]
             shuffled_actions = full_old_actions[rd_indices]
             shuffled_logprobs = full_old_logprobs[rd_indices]
             shuffled_returns = full_old_returns[rd_indices]
@@ -316,55 +319,19 @@ class DBRMAgent(AgentWithSimplePolicy):
 
                 # sample batch
                 batch_idx = np.arange(
-                    k * self.batch_size, min((k + 1) * self.batch_size, n_samples)
+                    k * self.batch_size, min((k + 1) * self.batch_size - 1, n_samples)
                 )
                 old_states = shuffled_states[batch_idx]
-                old_actions = shuffled_actions[batch_idx]
-                old_logprobs = shuffled_logprobs[batch_idx]
+                new_states = shuffled_new_states[batch_idx]
                 old_returns = shuffled_returns[batch_idx]
-                old_advantages = shuffled_advantages[batch_idx]
-
                 
-
                 # evaluate old actions and values
                 action_dist = self.cat_policy(old_states)
-                logprobs = action_dist.log_prob(old_actions)
                 state_values = torch.squeeze(self.value_net(old_states))
                 dist_entropy = action_dist.entropy()
 
-                # find ratio (pi_theta / pi_theta__old)
-                ratios = torch.exp(logprobs - old_logprobs)
-
-                # TODO: add this option
-                # normalizing the rewards
-                # rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
-
-                # normalize the advantages
-                old_advantages = old_advantages.view(
-                    -1,
-                )
-
-                if self.normalize_advantages:
-                    old_advantages = (old_advantages - old_advantages.mean()) / (
-                        old_advantages.std() + 1e-10
-                    )
-
-                # compute surrogate loss
-                surr1 = ratios * old_advantages
-                surr2 = (
-                    torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip)
-                    * old_advantages
-                )
-                surr_loss = torch.min(surr1, surr2)
-
-                # compute value function loss
-                loss_vf = self.vf_coef * self.MseLoss(state_values, old_returns)
-
-                # compute entropy loss
-                loss_entropy = self.entr_coef * dist_entropy
-
-                # compute total loss
-                loss = -surr_loss + loss_vf - loss_entropy
+                max_f = self.value_net(new_states).max(1)[0].detach()
+                loss = sum((state_values - old_returns - self.gamma*max_f)**2) / len(old_states)
 
                 # take gradient step
                 self.policy_optimizer.zero_grad()
@@ -377,11 +344,6 @@ class DBRMAgent(AgentWithSimplePolicy):
 
         # log
         if self.writer:
-            self.writer.add_scalar(
-                "fit/surrogate_loss",
-                surr_loss.mean().cpu().detach().numpy(),
-                self.episode,
-            )
             self.writer.add_scalar(
                 "fit/entropy_loss",
                 dist_entropy.mean().cpu().detach().numpy(),
