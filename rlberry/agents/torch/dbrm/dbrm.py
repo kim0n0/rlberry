@@ -196,7 +196,7 @@ class DBRMAgent(AgentWithSimplePolicy):
         state = observation
         assert self.cat_policy is not None
         state = torch.from_numpy(state).float().to(self.device)
-        action_dist = self.catstate_policy_old(state)
+        action_dist = self.cat_policy_old(state)
         action = action_dist.sample().item()
         return action
 
@@ -211,6 +211,7 @@ class DBRMAgent(AgentWithSimplePolicy):
     def _run_episode(self):
         # to store transitions
         states = []
+        next_states = []
         actions = []
         action_logprobs = []
         rewards = []
@@ -219,17 +220,16 @@ class DBRMAgent(AgentWithSimplePolicy):
         # interact for H steps
         episode_rewards = 0
         state = self.env.reset()
+        state = torch.from_numpy(state).float().to(self.device)
 
         for _ in range(self.horizon):
             # running policy_old
-            state = torch.from_numpy(state).float().to(self.device)
-
             action_dist = self.cat_policy_old(state)
             action = action_dist.sample()
             action_logprob = action_dist.log_prob(action)
-            action = action
 
             next_state, reward, done, info = self.env.step(action.item())
+            next_state = torch.from_numpy(next_state).float().to(self.device)
 
             # check whether to use bonus
             bonus = 0.0
@@ -239,6 +239,7 @@ class DBRMAgent(AgentWithSimplePolicy):
 
             # save transition
             states.append(state)
+            next_states.append(next_state)
             actions.append(action)
             action_logprobs.append(action_logprob)
             rewards.append(reward + bonus)  # bonus added here
@@ -261,8 +262,11 @@ class DBRMAgent(AgentWithSimplePolicy):
             rewards, is_terminals, state_values
         )
 
+        rewards = torch.Tensor(rewards).float().to(self.device)
+
         # save in batch
         self.memory.states.extend(states)
+        self.memory.next_states.extend(next_states)
         self.memory.actions.extend(actions)
         self.memory.logprobs.extend(action_logprobs)
         self.memory.rewards.extend(rewards)
@@ -293,9 +297,11 @@ class DBRMAgent(AgentWithSimplePolicy):
 
         # convert list to tensor
         full_old_states = torch.stack(self.memory.states).to(self.device).detach()
+        full_new_states = torch.stack(self.memory.next_states).to(self.device).detach()
         full_old_actions = torch.stack(self.memory.actions).to(self.device).detach()
         full_old_logprobs = torch.stack(self.memory.logprobs).to(self.device).detach()
         full_old_returns = torch.stack(self.returns).to(self.device).detach()
+        full_old_rewards = torch.stack(self.memory.rewards).to(self.device).detach()
         full_old_advantages = torch.stack(self.advantages).to(self.device).detach()
 
         # optimize policy for K epochs
@@ -307,9 +313,11 @@ class DBRMAgent(AgentWithSimplePolicy):
             # shuffle samples
             rd_indices = self.rng.choice(n_samples, size=n_samples, replace=False)
             shuffled_states = full_old_states[rd_indices]
+            shuffled_next_states = full_new_states[rd_indices]
             shuffled_actions = full_old_actions[rd_indices]
             shuffled_logprobs = full_old_logprobs[rd_indices]
             shuffled_returns = full_old_returns[rd_indices]
+            shuffled_rewards = full_old_rewards[rd_indices]
             shuffled_advantages = full_old_advantages[rd_indices]
 
             for k in range(n_batches):
@@ -319,17 +327,18 @@ class DBRMAgent(AgentWithSimplePolicy):
                     k * self.batch_size, min((k + 1) * self.batch_size, n_samples)
                 )
                 old_states = shuffled_states[batch_idx]
+                new_states = shuffled_next_states[batch_idx]
                 old_actions = shuffled_actions[batch_idx]
                 old_logprobs = shuffled_logprobs[batch_idx]
                 old_returns = shuffled_returns[batch_idx]
+                old_rewards = shuffled_rewards[batch_idx]
                 old_advantages = shuffled_advantages[batch_idx]
-
-                
 
                 # evaluate old actions and values
                 action_dist = self.cat_policy(old_states)
                 logprobs = action_dist.log_prob(old_actions)
                 state_values = torch.squeeze(self.value_net(old_states))
+                new_state_values = torch.squeeze(self.value_net(new_states))
                 dist_entropy = action_dist.entropy()
 
                 # find ratio (pi_theta / pi_theta__old)
@@ -364,7 +373,8 @@ class DBRMAgent(AgentWithSimplePolicy):
                 loss_entropy = self.entr_coef * dist_entropy
 
                 # compute total loss
-                loss = -surr_loss + loss_vf - loss_entropy
+                # loss = -surr_loss + loss_vf - loss_entropy
+                loss = ((state_values - old_rewards - self.gamma*new_state_values)**2).mean()
 
                 # take gradient step
                 self.policy_optimizer.zero_grad()
@@ -378,13 +388,8 @@ class DBRMAgent(AgentWithSimplePolicy):
         # log
         if self.writer:
             self.writer.add_scalar(
-                "fit/surrogate_loss",
-                surr_loss.mean().cpu().detach().numpy(),
-                self.episode,
-            )
-            self.writer.add_scalar(
-                "fit/entropy_loss",
-                dist_entropy.mean().cpu().detach().numpy(),
+                "fit/brm_loss",
+                loss.mean().cpu().detach().numpy(),
                 self.episode,
             )
 

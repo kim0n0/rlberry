@@ -11,24 +11,26 @@ A demo of PPO algorithm in PBall2D environment
 """
 # sphinx_gallery_thumbnail_path = 'thumbnails/video_plot_a2c.jpg'
 
-from rlberry.agents.torch import PPOAgent
+from rlberry.agents.torch import DBRMAgent
 from rlberry.envs.benchmarks.ball_exploration import PBall2D
-# from rlberry.envs.classic_control.mountain_car import MountainCar
+from rlberry.envs.classic_control.mountain_car import MountainCar
+from rlberry.envs.classic_control.acrobot import Acrobot
 
 
 env = PBall2D()
 # env = MountainCar()
-n_episodes = 200
+# env = Acrobot
+n_episodes = 400
 horizon = 256
 
-agent = PPOAgent(
-    env, horizon=horizon, gamma=0.99, learning_rate=0.001, eps_clip=0.2, k_epochs=4
+agent = DBRMAgent(
+    env, horizon=horizon, gamma=0.99, learning_rate=0.001, eps_clip=0.2, k_epochs=100
 )
 agent.fit(budget=n_episodes)
 
 env.enable_rendering()
 state = env.reset()
-for tt in range(200):
+for tt in range(n_episodes):
     action = agent.policy(state)
     next_state, reward, done, _ = env.step(action)
     state = next_state
