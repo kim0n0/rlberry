@@ -374,7 +374,7 @@ class DBRMAgent(AgentWithSimplePolicy):
 
                 # compute total loss
                 # loss = -surr_loss + loss_vf - loss_entropy
-                loss = ((state_values - old_rewards - self.gamma*new_state_values)**2).mean()
+                loss = (state_values - old_rewards - self.gamma*new_state_values).pow(2)
 
                 # take gradient step
                 self.policy_optimizer.zero_grad()
