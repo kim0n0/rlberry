@@ -33,16 +33,10 @@ class DBRMAgent(AgentWithSimplePolicy):
         Horizon.
     gamma : double
         Discount factor in [0, 1].
-    entr_coef : double
-        Entropy coefficient.
-    vf_coef : double
-        Value function loss coefficient.
     learning_rate : double
         Learning rate.
     optimizer_type: str
         Type of optimizer. 'ADAM' by defaut.
-    eps_clip : double
-        PPO clipping range (epsilon).
     k_epochs : int
         Number of epochs per update.
     policy_net_fn : function(env, **kwargs)
@@ -74,7 +68,7 @@ class DBRMAgent(AgentWithSimplePolicy):
     In International Conference on Machine Learning (pp. 1889-1897).
     """
 
-    name = "PPO"
+    name = "DBRM"
 
     def __init__(
         self,
@@ -83,11 +77,8 @@ class DBRMAgent(AgentWithSimplePolicy):
         update_frequency=8,
         horizon=256,
         gamma=0.99,
-        entr_coef=0.01,
-        vf_coef=0.5,
         learning_rate=0.01,
         optimizer_type="ADAM",
-        eps_clip=0.2,
         k_epochs=5,
         use_gae=True,
         gae_lambda=0.95,
@@ -118,10 +109,6 @@ class DBRMAgent(AgentWithSimplePolicy):
         self.batch_size = batch_size
         self.k_epochs = k_epochs
         self.update_frequency = update_frequency
-
-        self.eps_clip = eps_clip
-        self.vf_coef = vf_coef
-        self.entr_coef = entr_coef
 
         # options
         # TODO: add reward normalization option
@@ -187,8 +174,6 @@ class DBRMAgent(AgentWithSimplePolicy):
         self.MseLoss = nn.MSELoss()  # TODO: turn into argument
 
         self.memory = Memory()  # TODO: Improve memory to include returns and advantages
-        self.returns = []  # TODO: add to memory
-        self.advantages = []  # TODO: add to memory
 
         self.episode = 0
 
@@ -212,8 +197,6 @@ class DBRMAgent(AgentWithSimplePolicy):
         # to store transitions
         states = []
         next_states = []
-        actions = []
-        action_logprobs = []
         rewards = []
         is_terminals = []
 
@@ -226,8 +209,6 @@ class DBRMAgent(AgentWithSimplePolicy):
             # running policy_old
             action_dist = self.cat_policy_old(state)
             action = action_dist.sample()
-            action_logprob = action_dist.log_prob(action)
-
             next_state, reward, done, info = self.env.step(action.item())
             next_state = torch.from_numpy(next_state).float().to(self.device)
 
@@ -240,8 +221,6 @@ class DBRMAgent(AgentWithSimplePolicy):
             # save transition
             states.append(state)
             next_states.append(next_state)
-            actions.append(action)
-            action_logprobs.append(action_logprob)
             rewards.append(reward + bonus)  # bonus added here
             is_terminals.append(done)
 
@@ -257,23 +236,13 @@ class DBRMAgent(AgentWithSimplePolicy):
         state_values = self.value_net(torch.stack(states).to(self.device)).detach()
         state_values = torch.squeeze(state_values).tolist()
 
-        # TODO: add the option to normalize before computing returns/advantages?
-        returns, advantages = self._compute_returns_avantages(
-            rewards, is_terminals, state_values
-        )
-
         rewards = torch.Tensor(rewards).float().to(self.device)
 
         # save in batch
         self.memory.states.extend(states)
         self.memory.next_states.extend(next_states)
-        self.memory.actions.extend(actions)
-        self.memory.logprobs.extend(action_logprobs)
         self.memory.rewards.extend(rewards)
         self.memory.is_terminals.extend(is_terminals)
-
-        self.returns.extend(returns)  # TODO: add to memory (cf reset)
-        self.advantages.extend(advantages)  # TODO: add to memory (cf reset)
 
         # increment ep counter
         self.episode += 1
@@ -288,24 +257,17 @@ class DBRMAgent(AgentWithSimplePolicy):
         ):  # TODO: maybe change to update in function of n_steps instead
             self._update()
             self.memory.clear_memory()
-            del self.returns[:]  # TODO: add to memory (cf reset)
-            del self.advantages[:]  # TODO: add to memory (cf reset)
 
         return episode_rewards
 
     def _update(self):
-
         # convert list to tensor
         full_old_states = torch.stack(self.memory.states).to(self.device).detach()
         full_new_states = torch.stack(self.memory.next_states).to(self.device).detach()
-        full_old_actions = torch.stack(self.memory.actions).to(self.device).detach()
-        full_old_logprobs = torch.stack(self.memory.logprobs).to(self.device).detach()
-        full_old_returns = torch.stack(self.returns).to(self.device).detach()
         full_old_rewards = torch.stack(self.memory.rewards).to(self.device).detach()
-        full_old_advantages = torch.stack(self.advantages).to(self.device).detach()
 
         # optimize policy for K epochs
-        n_samples = full_old_actions.size(0)
+        n_samples = full_old_states.size(0)
         n_batches = n_samples // self.batch_size
 
         for _ in range(self.k_epochs):
@@ -314,11 +276,7 @@ class DBRMAgent(AgentWithSimplePolicy):
             rd_indices = self.rng.choice(n_samples, size=n_samples, replace=False)
             shuffled_states = full_old_states[rd_indices]
             shuffled_next_states = full_new_states[rd_indices]
-            shuffled_actions = full_old_actions[rd_indices]
-            shuffled_logprobs = full_old_logprobs[rd_indices]
-            shuffled_returns = full_old_returns[rd_indices]
             shuffled_rewards = full_old_rewards[rd_indices]
-            shuffled_advantages = full_old_advantages[rd_indices]
 
             for k in range(n_batches):
 
@@ -328,53 +286,15 @@ class DBRMAgent(AgentWithSimplePolicy):
                 )
                 old_states = shuffled_states[batch_idx]
                 new_states = shuffled_next_states[batch_idx]
-                old_actions = shuffled_actions[batch_idx]
-                old_logprobs = shuffled_logprobs[batch_idx]
-                old_returns = shuffled_returns[batch_idx]
                 old_rewards = shuffled_rewards[batch_idx]
-                old_advantages = shuffled_advantages[batch_idx]
 
                 # evaluate old actions and values
-                action_dist = self.cat_policy(old_states)
-                logprobs = action_dist.log_prob(old_actions)
                 state_values = torch.squeeze(self.value_net(old_states))
                 new_state_values = torch.squeeze(self.value_net(new_states))
-                dist_entropy = action_dist.entropy()
-
-                # find ratio (pi_theta / pi_theta__old)
-                ratios = torch.exp(logprobs - old_logprobs)
-
-                # TODO: add this option
-                # normalizing the rewards
-                # rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
-
-                # normalize the advantages
-                old_advantages = old_advantages.view(
-                    -1,
-                )
-
-                if self.normalize_advantages:
-                    old_advantages = (old_advantages - old_advantages.mean()) / (
-                        old_advantages.std() + 1e-10
-                    )
-
-                # compute surrogate loss
-                surr1 = ratios * old_advantages
-                surr2 = (
-                    torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip)
-                    * old_advantages
-                )
-                surr_loss = torch.min(surr1, surr2)
-
-                # compute value function loss
-                loss_vf = self.vf_coef * self.MseLoss(state_values, old_returns)
-
-                # compute entropy loss
-                loss_entropy = self.entr_coef * dist_entropy
 
                 # compute total loss
                 # loss = -surr_loss + loss_vf - loss_entropy
-                loss = (state_values - old_rewards - self.gamma*new_state_values).pow(2)
+                loss = self.MseLoss(state_values, old_rewards + self.gamma*new_state_values)
 
                 # take gradient step
                 self.policy_optimizer.zero_grad()
@@ -396,51 +316,6 @@ class DBRMAgent(AgentWithSimplePolicy):
         # copy new weights into old policy
         self.cat_policy_old.load_state_dict(self.cat_policy.state_dict())
 
-    def _compute_returns_avantages(self, rewards, is_terminals, state_values):
-
-        returns = torch.zeros(self.horizon).to(self.device)
-        advantages = torch.zeros(self.horizon).to(self.device)
-
-        if not self.use_gae:
-            for t in reversed(range(self.horizon)):
-                if t == self.horizon - 1:
-                    returns[t] = (
-                        rewards[t]
-                        + self.gamma * (1 - is_terminals[t]) * state_values[-1]
-                    )
-                else:
-                    returns[t] = (
-                        rewards[t] + self.gamma * (1 - is_terminals[t]) * returns[t + 1]
-                    )
-
-                advantages[t] = returns[t] - state_values[t]
-        else:
-            last_adv = 0
-            for t in reversed(range(self.horizon)):
-                if t == self.horizon - 1:
-                    returns[t] = (
-                        rewards[t]
-                        + self.gamma * (1 - is_terminals[t]) * state_values[-1]
-                    )
-                    td_error = returns[t] - state_values[t]
-                else:
-                    returns[t] = (
-                        rewards[t] + self.gamma * (1 - is_terminals[t]) * returns[t + 1]
-                    )
-                    td_error = (
-                        rewards[t]
-                        + self.gamma * (1 - is_terminals[t]) * state_values[t + 1]
-                        - state_values[t]
-                    )
-
-                last_adv = (
-                    self.gae_lambda * self.gamma * (1 - is_terminals[t]) * last_adv
-                    + td_error
-                )
-                advantages[t] = last_adv
-
-        return returns, advantages
-
     #
     # For hyperparameter optimization
     #
@@ -449,18 +324,11 @@ class DBRMAgent(AgentWithSimplePolicy):
         batch_size = trial.suggest_categorical("batch_size", [1, 4, 8, 16, 32])
         gamma = trial.suggest_categorical("gamma", [0.9, 0.95, 0.99])
         learning_rate = trial.suggest_loguniform("learning_rate", 1e-5, 1)
-
-        entr_coef = trial.suggest_loguniform("entr_coef", 1e-8, 0.1)
-
-        eps_clip = trial.suggest_categorical("eps_clip", [0.1, 0.2, 0.3])
-
         k_epochs = trial.suggest_categorical("k_epochs", [1, 5, 10, 20])
 
         return {
             "batch_size": batch_size,
             "gamma": gamma,
             "learning_rate": learning_rate,
-            "entr_coef": entr_coef,
-            "eps_clip": eps_clip,
             "k_epochs": k_epochs,
         }
