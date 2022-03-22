@@ -5,10 +5,6 @@ import logging
 
 import gym.spaces as spaces
 from rlberry.agents import AgentWithSimplePolicy
-from rlberry.agents.utils.memories import Memory
-from rlberry.agents.torch.utils.training import optimizer_factory
-from rlberry.agents.torch.utils.models import default_policy_net_fn
-from rlberry.agents.torch.utils.models import default_value_net_fn
 from rlberry.utils.torch import choose_device
 from rlberry.wrappers.uncertainty_estimator_wrapper import UncertaintyEstimatorWrapper
 
@@ -21,10 +17,16 @@ from torch.optim import Adam
 logger = logging.getLogger(__name__)
 
 def surrogate_loss(new_probabilities, old_probabilities, advantages):
+    """
+    Calculates the surrogate loss function in TRPO
+    """
     return (new_probabilities / old_probabilities * advantages).mean()
 
 
 def kl_div(p, q):
+    """
+    Calculates the Kullback Leibler Divergence between p and q
+    """
     p = p.detach()
     return (p * (p.log() - q.log())).sum(-1).mean()
 
@@ -78,16 +80,6 @@ class TRPOAgent(AgentWithSimplePolicy):
         Discount factor in [0, 1].
     learning_rate : double
         Learning rate.
-    policy_net_fn : function(env, **kwargs)
-        Function that returns an instance of a policy network (pytorch).
-        If None, a default net is used.
-    value_net_fn : function(env, **kwargs)
-        Function that returns an instance of a value network (pytorch).
-        If None, a default net is used.
-    policy_net_kwargs : dict
-        kwargs for policy_net_fn
-    value_net_kwargs : dict
-        kwargs for value_net_fn
     device: str
         Device to put the tensors on
     use_bonus : bool, default = False
@@ -98,13 +90,8 @@ class TRPOAgent(AgentWithSimplePolicy):
 
     References
     ----------
-    Schulman, J., Wolski, F., Dhariwal, P., Radford, A. & Klimov, O. (2017).
-    "Proximal Policy Optimization Algorithms."
-    arXiv preprint arXiv:1707.06347.
-
     Schulman, J., Levine, S., Abbeel, P., Jordan, M., & Moritz, P. (2015).
     "Trust region policy optimization."
-    In International Conference on Machine Learning (pp. 1889-1897).
     """
 
     name = "TRPO"
@@ -116,17 +103,13 @@ class TRPOAgent(AgentWithSimplePolicy):
         horizon=256,
         gamma=0.99,
         learning_rate=0.01,
-        policy_net_fn=None,
-        value_net_fn=None,
-        policy_net_kwargs=None,
-        value_net_kwargs=None,
         device="cuda:best",
         use_bonus=False,
         uncertainty_estimator_kwargs=None,
         delta = 0.1,
         num_rollouts = 100,
         **kwargs
-    ):  # TODO: sort arguments
+    ): 
 
         AgentWithSimplePolicy.__init__(self, env, **kwargs)
 
@@ -145,24 +128,9 @@ class TRPOAgent(AgentWithSimplePolicy):
         self.batch_size = batch_size
 
 
-        # options
-        # TODO: add reward normalization option
-        #       add observation normalization option
-        #       add orthogonal weight initialization option
-        #       add value function clip option
-        #       add ... ?
-        self.normalize_advantages = True  # TODO: turn into argument
-
-        # function approximators
-        self.policy_net_kwargs = policy_net_kwargs or {}
-        self.value_net_kwargs = value_net_kwargs or {}
-
         self.state_dim = self.env.observation_space.shape[0]
         self.action_dim = self.env.action_space.n
 
-        #
-        self.policy_net_fn = policy_net_fn or default_policy_net_fn
-        self.value_net_fn = value_net_fn or default_value_net_fn
 
         self.device = choose_device(device)
 
@@ -173,29 +141,29 @@ class TRPOAgent(AgentWithSimplePolicy):
         # initialize
         self.reset()
 
+        #TRPO parameters
 
-        self.delta = delta
-        self.num_rollouts = num_rollouts
+        self.delta = delta # delta in the "subject to" inequality
 
-        self.Rollout = namedtuple('Rollout', ['states', 'actions', 'rewards', 'next_states', ])
+        self.num_rollouts = num_rollouts #number of rolouts per epoch
+
+        self.Rollout = namedtuple('Rollout', ['states', 'actions', 'rewards', 'next_states', ]) 
 
 
-        
-
-    @classmethod
-    def from_config(cls, **kwargs):
-        kwargs["policy_net_fn"] = eval(kwargs["policy_net_fn"])
-        kwargs["value_net_fn"] = eval(kwargs["value_net_fn"])
-        return cls(**kwargs)
 
     def reset(self, **kwargs):
+        """
+        Resets the agent
+        """
         actor_hidden = 32
+        #actor is a net that takes the action
         self.actor = nn.Sequential(nn.Linear(self.state_dim, actor_hidden),
                             nn.ReLU(),
                             nn.Linear(actor_hidden, self.action_dim),
                             nn.Softmax(dim=1))
 
         critic_hidden = 32
+        #critic is a net that evaluates the states
         self.critic = nn.Sequential(nn.Linear(self.state_dim, critic_hidden),
                             nn.ReLU(),
                             nn.Linear(critic_hidden, 1))
@@ -205,12 +173,18 @@ class TRPOAgent(AgentWithSimplePolicy):
         self.episode = 0
 
     def policy(self, observation):
+        """
+        Given an observation (the state), return the action to take
+        """
         state = observation
         state = torch.tensor(state).float().unsqueeze(0)  # Turn state into a batch with a single element
         dist = Categorical(self.actor(state))  # Create a distribution from probabilities for actions
         return dist.sample().item()
 
     def fit(self, budget: int, **kwargs):
+        """
+        Train the agent in the environment following TRPO algorithm
+        """
         del kwargs
         n_episodes_to_run = budget
         count = 0
@@ -219,12 +193,15 @@ class TRPOAgent(AgentWithSimplePolicy):
             count += 1
 
     def _run_episode(self):
+        """
+        Run one training episode according to the TRPO algorithm
+        """
         rollouts = []
 
         
         episode_rewards = 0
 
-        for t in range(self.num_rollouts):
+        for t in range(self.num_rollouts): #Doing rollouts
             state = self.env.reset()
             done = False
 
@@ -253,15 +230,23 @@ class TRPOAgent(AgentWithSimplePolicy):
             actions = torch.as_tensor(actions).unsqueeze(1)
             rewards = torch.as_tensor(rewards).unsqueeze(1)
 
+            #Adding the rollout
             rollouts.append(self.Rollout(states, actions, rewards, next_states))
 
+        #Updating the agent
         self._update(rollouts)
+
+        #Increment episode
         self.episode += 1
+
         # log
         if self.writer is not None:
             self.writer.add_scalar("episode_rewards", episode_rewards/self.num_rollouts, self.episode)
 
     def update_critic(self, advantages):
+        """
+        Runs a backward propagation on the critic network
+        """
         loss = .5 * (advantages ** 2).mean()
         self.critic_optimizer.zero_grad()
         loss.backward()
@@ -269,6 +254,9 @@ class TRPOAgent(AgentWithSimplePolicy):
 
 
     def estimate_advantages(self, states, last_state, rewards):
+        """
+        Calculate the advatage function
+        """
         values = self.critic(states)
         last_value = self.critic(last_state.unsqueeze(0))
         
@@ -280,6 +268,9 @@ class TRPOAgent(AgentWithSimplePolicy):
         return advantages
 
     def apply_update(self, grad_flattened):
+        """
+        Updates the actor network
+        """
         n = 0
         for p in self.actor.parameters():
             numel = p.numel()
@@ -291,12 +282,18 @@ class TRPOAgent(AgentWithSimplePolicy):
 
     def _update(self, rollouts):
 
+        """
+        After running rollouts, use this function to update the agent
+        """
+
         states = torch.cat([r.states for r in rollouts], dim=0)
         actions = torch.cat([r.actions for r in rollouts], dim=0).flatten()
 
+        #Getting the advantages function
         advantages = [self.estimate_advantages(states, next_states[-1], rewards) for states, _, rewards, next_states in rollouts]
         advantages = torch.cat(advantages, dim=0).flatten()
 
+        #Updating the critic network
         self.update_critic(advantages)
 
         distribution = self.actor(states)
@@ -305,8 +302,8 @@ class TRPOAgent(AgentWithSimplePolicy):
 
         # We will calculate the gradient wrt to the new probabilities (surrogate function),
         # so second probabilities should be treated as a constant
-        L = surrogate_loss(probabilities, probabilities.detach(), advantages)
-        KL = kl_div(distribution, distribution)
+        L = surrogate_loss(probabilities, probabilities.detach(), advantages) #Loss
+        KL = kl_div(distribution, distribution) #Kullback Leibler Divergence
 
         parameters = list(self.actor.parameters())
 
@@ -314,6 +311,9 @@ class TRPOAgent(AgentWithSimplePolicy):
         d_kl = flat_grad(KL, parameters, create_graph=True)  # Create graph, because we will call backward() on it (for HVP)
 
         def HVP(v):
+            """
+            Hessian Vector Product
+            """
             return flat_grad(d_kl @ v, parameters, retain_graph=True)
 
         search_dir = conjugate_gradient(HVP, g, self.delta, max_iterations=20)
@@ -321,6 +321,9 @@ class TRPOAgent(AgentWithSimplePolicy):
         max_step = max_length * search_dir
 
         def criterion(step):
+            """
+            Implement constrained maximization problem.
+            """
             # Apply parameters' update
             self.apply_update(step)
 
