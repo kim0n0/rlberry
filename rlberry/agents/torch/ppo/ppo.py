@@ -61,6 +61,8 @@ class PPOAgent(AgentWithSimplePolicy):
     use_bonus : bool, default = False
         If true, compute the environment 'exploration_bonus'
         and add it to the reward. See also UncertaintyEstimatorWrapper.
+    use_brm : bool, default = False
+        If true, use brm for the value network loss
     uncertainty_estimator_kwargs : dict
         kwargs for UncertaintyEstimatorWrapper
 
@@ -98,6 +100,7 @@ class PPOAgent(AgentWithSimplePolicy):
         value_net_kwargs=None,
         device="cuda:best",
         use_bonus=False,
+        use_brm=False,
         uncertainty_estimator_kwargs=None,
         **kwargs
     ):  # TODO: sort arguments
@@ -121,6 +124,7 @@ class PPOAgent(AgentWithSimplePolicy):
         self.update_frequency = update_frequency
 
         self.eps_clip = eps_clip
+        self.use_brm = use_brm
         self.vf_coef = vf_coef
         self.entr_coef = entr_coef
 
@@ -257,6 +261,8 @@ class PPOAgent(AgentWithSimplePolicy):
         state_values = self.value_net(torch.stack(states).to(self.device)).detach()
         state_values = torch.squeeze(state_values).tolist()
 
+        rewards = torch.Tensor(rewards).float().to(self.device)
+        
         # TODO: add the option to normalize before computing returns/advantages?
         returns, advantages = self._compute_returns_avantages(
             rewards, is_terminals, state_values
@@ -264,6 +270,7 @@ class PPOAgent(AgentWithSimplePolicy):
 
         # save in batch
         self.memory.states.extend(states)
+        self.memory.next_states.extend(states[1:] + [torch.from_numpy(next_state).float().to(self.device)])
         self.memory.actions.extend(actions)
         self.memory.logprobs.extend(action_logprobs)
         self.memory.rewards.extend(rewards)
@@ -294,10 +301,13 @@ class PPOAgent(AgentWithSimplePolicy):
 
         # convert list to tensor
         full_old_states = torch.stack(self.memory.states).to(self.device).detach()
+        full_next_states = torch.stack(self.memory.next_states).to(self.device).detach()
         full_old_actions = torch.stack(self.memory.actions).to(self.device).detach()
         full_old_logprobs = torch.stack(self.memory.logprobs).to(self.device).detach()
         full_old_returns = torch.stack(self.returns).to(self.device).detach()
         full_old_advantages = torch.stack(self.advantages).to(self.device).detach()
+        full_old_rewards = torch.stack(self.memory.rewards).to(self.device).detach()
+
 
         # optimize policy for K epochs
         n_samples = full_old_actions.size(0)
@@ -308,10 +318,12 @@ class PPOAgent(AgentWithSimplePolicy):
             # shuffle samples
             rd_indices = self.rng.choice(n_samples, size=n_samples, replace=False)
             shuffled_states = full_old_states[rd_indices]
+            shuffled_next_states = full_next_states[rd_indices]
             shuffled_actions = full_old_actions[rd_indices]
             shuffled_logprobs = full_old_logprobs[rd_indices]
             shuffled_returns = full_old_returns[rd_indices]
             shuffled_advantages = full_old_advantages[rd_indices]
+            shuffled_rewards = full_old_rewards[rd_indices]
 
             for k in range(n_batches):
 
@@ -320,10 +332,12 @@ class PPOAgent(AgentWithSimplePolicy):
                     k * self.batch_size, min((k + 1) * self.batch_size, n_samples)
                 )
                 old_states = shuffled_states[batch_idx]
+                next_states = shuffled_next_states[batch_idx]
                 old_actions = shuffled_actions[batch_idx]
                 old_logprobs = shuffled_logprobs[batch_idx]
                 old_returns = shuffled_returns[batch_idx]
                 old_advantages = shuffled_advantages[batch_idx]
+                old_rewards = shuffled_rewards[batch_idx]
 
                 # evaluate old actions and values
                 action_dist = self.cat_policy(old_states)
@@ -357,7 +371,11 @@ class PPOAgent(AgentWithSimplePolicy):
                 surr_loss = torch.min(surr1, surr2)
 
                 # compute value function loss
-                loss_vf = self.vf_coef * self.MseLoss(state_values, old_returns)
+                if self.use_brm:
+                    next_state_values = torch.squeeze(self.value_net(next_states))
+                    loss_vf = self.vf_coef * self.MseLoss(state_values, old_rewards + self.gamma*next_state_values)
+                else:
+                    loss_vf = self.vf_coef * self.MseLoss(state_values, old_returns)
 
                 # compute entropy loss
                 loss_entropy = self.entr_coef * dist_entropy
