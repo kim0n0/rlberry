@@ -11,23 +11,25 @@ A demo of PPO algorithm in PBall2D environment
 """
 # sphinx_gallery_thumbnail_path = 'thumbnails/video_plot_a2c.jpg'
 
-from rlberry.agents.torch.dbrm.dbrm import DBRMAgent
+from rlberry.agents.torch.ppo.ppo import PPOAgent
 from rlberry.envs.benchmarks.ball_exploration import PBall2D
 from rlberry.envs.classic_control.mountain_car import MountainCar
 from rlberry.envs.classic_control.acrobot import Acrobot
 from rlberry.envs.classic_control.pendulum import Pendulum
-
+from rlberry.envs.bullet3.pybullet_envs.robot_pendula import Pendulum
+from rlberry.envs.finite.gridworld import GridWorld
 
 
 env = PBall2D()
 # env = MountainCar()
 # env = Acrobot() # ppoagent not working well with terminal states
+# env = GridWorld()
 
 n_episodes = 200
 horizon = 256
 
-agent = DBRMAgent(
-    env, horizon=horizon, gamma=0.99, learning_rate=0.001, k_epochs=5
+agent = PPOAgent(
+    env, horizon=horizon, gamma=0.99, learning_rate=0.001, k_epochs=5, use_brm=True
 )
 
 agent.fit(budget=n_episodes)

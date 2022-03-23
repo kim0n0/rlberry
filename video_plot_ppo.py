@@ -13,9 +13,14 @@ A demo of PPO algorithm in PBall2D environment
 
 from rlberry.agents.torch import PPOAgent
 from rlberry.envs.benchmarks.ball_exploration import PBall2D
+from rlberry.envs.classic_control.mountain_car import MountainCar
+from rlberry.envs.classic_control.acrobot import Acrobot
+from rlberry.envs.classic_control.pendulum import Pendulum
 
+# env = MountainCar()
+env = Acrobot() # ppoagent not working well with terminal states
+# env = PBall2D()
 
-env = PBall2D()
 n_episodes = 200
 horizon = 256
 
