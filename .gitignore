@@ -9,6 +9,7 @@ _video/**
 # pickled objects and csv
 *.pickle
 *.csv
+!/benchmarks/**
 
 # test coverage folder
 cov_html/*
