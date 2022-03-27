@@ -414,7 +414,10 @@ class PPOAgent(AgentWithSimplePolicy):
         self.cat_policy_old.load_state_dict(self.cat_policy.state_dict())
 
     def _compute_returns_avantages(self, rewards, is_terminals, state_values):
-
+        true_horizon = self.horizon
+        if rewards.shape[0] < true_horizon:
+            self.horizon = rewards.shape[0]
+            
         returns = torch.zeros(self.horizon).to(self.device)
         advantages = torch.zeros(self.horizon).to(self.device)
 
@@ -455,7 +458,7 @@ class PPOAgent(AgentWithSimplePolicy):
                     + td_error
                 )
                 advantages[t] = last_adv
-
+        self.horizon = true_horizon
         return returns, advantages
 
     #
